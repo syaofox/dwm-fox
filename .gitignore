@@ -1,0 +1,67 @@
+# Build output
+/dwm
+*.o
+
+# Local build configuration, generated from config.def.h. Never tracked: it
+# holds machine-specific values and the installer preserves it across upgrades.
+/config.h
+
+# Patch and merge leftovers
+*.rej
+*.orig
+
+# Test workspaces and scratch output
+# scripts/run-tests normally stages under $HOME/tmp, but DWM_TEST_TMP_ROOT may
+# be pointed inside the checkout. These hold the runner token and any fixtures.
+/.dwm-fox-tests.*/
+/tmp/
+*.runner
+# Installer and helper logs. tests/RESULTS.md is the authoritative test record
+# for this port and is tracked; ad-hoc logs are not.
+*.log
+nohup.out
+
+# Exception: docs/evidence/ is inherited upstream release evidence. It is
+# historical record, not this port's output, and is kept deliberately so nothing
+# inherited from upstream is silently dropped. It describes Fedora, not Debian.
+!docs/evidence/**/*.log
+
+# Environment and credential material. Nothing in this repository may carry a
+# secret; a stray file here must never be committed.
+/.env
+.env.*
+*.pem
+*.key
+*.crt
+id_rsa*
+id_ed25519*
+.cred
+*.cred
+.sudopass
+.netrc
+.netrc.*
+
+# Local editor and OS noise
+.DS_Store
+Thumbs.db
+# Editor settings may contain machine-specific absolute paths.
+/.zed/settings.json
+/.idea/
+/.vscode/
+
+# Generated documentation output and local dependencies.
+/docs/.astro/
+/docs/dist/
+/docs/node_modules/
+
+# Release staging tree
+/release/
+/release
+*.iso
+*.tar.gz
+
+# Upstream-local tooling leftovers
+/vicinae/
+/.ci-pykickstart/
+/.serena/
+/.astro/

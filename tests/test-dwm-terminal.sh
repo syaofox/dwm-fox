@@ -1,0 +1,203 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+HELPER="$ROOT_DIR/scripts/dwm-terminal"
+BASH_BIN="${BASH:-/usr/bin/bash}"
+
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+
+mkdir -p "$work/bin" "$work/home/.config/dwm-fox"
+export HOME="$work/home"
+export XDG_CONFIG_HOME="$HOME/.config"
+
+cat >"$XDG_CONFIG_HOME/dwm-fox/hotkeys.toml" <<'EOF'
+[vars]
+terminal = "alacritty"
+EOF
+
+cat >"$work/bin/alacritty" <<'SCRIPT'
+#!/bin/sh
+printf '%s\n' "$0" >"$DWM_TERMINAL_TEST_OUT"
+printf 'identity=%s\n' "${DWM_UPDATE_CENTER_TERMINAL_IDENTITY:-}" >>"$DWM_TERMINAL_TEST_OUT"
+printf '%s\n' "$@" >>"$DWM_TERMINAL_TEST_OUT"
+SCRIPT
+chmod +x "$work/bin/alacritty"
+
+cat >"$work/bin/kitty" <<'SCRIPT'
+#!/bin/sh
+printf '%s\n' "$0" >"$DWM_TERMINAL_TEST_OUT"
+printf '%s\n' "$@" >>"$DWM_TERMINAL_TEST_OUT"
+SCRIPT
+chmod +x "$work/bin/kitty"
+
+DWM_TERMINAL_TEST_OUT="$work/out" \
+	PATH="$work/bin" \
+	"$BASH_BIN" "$HELPER" --class dwm-test
+
+grep -Fqx "$work/bin/alacritty" "$work/out"
+grep -Fqx -- "--class" "$work/out"
+grep -Fqx "dwm-test" "$work/out"
+
+DWM_TERMINAL_TEST_OUT="$work/update-center-out" \
+	PATH="$work/bin" \
+	"$BASH_BIN" "$HELPER" --update-center /usr/bin/dwm-update-center-terminal op-00000000000000000000000000000000 fedora update
+grep -Fqx -- '-o' "$work/update-center-out"
+grep -Fqx 'font.size=9' "$work/update-center-out"
+grep -Fqx -- '--class' "$work/update-center-out"
+grep -Fqx 'DwmUpdateCenter,dwm-update-center' "$work/update-center-out"
+grep -Fqx -- '--title' "$work/update-center-out"
+grep -Fqx 'dwm update center tiled' "$work/update-center-out"
+grep -Fqx -- '-e' "$work/update-center-out"
+grep -Fqx '/usr/bin/dwm-update-center-terminal' "$work/update-center-out"
+
+# The saved mode controls terminal mapping, including the mode inherited by
+# the runner when it writes its OSC title.
+/usr/bin/python3 "$ROOT_DIR/scripts/dwm-update-center-settings" set 3600 enabled absent floating >/dev/null
+DWM_TERMINAL_TEST_OUT="$work/update-center-floating-out" \
+	PATH="$work/bin" \
+	"$BASH_BIN" "$HELPER" --update-center /usr/bin/dwm-update-center-terminal op-00000000000000000000000000000000 fedora update
+grep -Fqx 'dwm update center' "$work/update-center-floating-out"
+
+# Test fallback: custom unsupported terminal in hotkeys.toml falls back to alacritty for update-center
+cat >"$work/bin/custom-term" <<'SCRIPT'
+#!/bin/sh
+printf '%s\n' "$0" >"$DWM_TERMINAL_TEST_OUT"
+printf '%s\n' "$@" >>"$DWM_TERMINAL_TEST_OUT"
+SCRIPT
+chmod +x "$work/bin/custom-term"
+
+sed -i 's/terminal = "alacritty"/terminal = "custom-term"/' \
+	"$XDG_CONFIG_HOME/dwm-fox/hotkeys.toml"
+DWM_TERMINAL_TEST_OUT="$work/custom-general-out" \
+	PATH="$work/bin" \
+	"$BASH_BIN" "$HELPER" echo test
+grep -Fqx "$work/bin/custom-term" "$work/custom-general-out"
+
+DWM_TERMINAL_TEST_OUT="$work/custom-fallback-out" \
+	PATH="$work/bin" \
+	"$BASH_BIN" "$HELPER" --update-center /usr/bin/dwm-update-center-terminal op-00000000000000000000000000000000 fedora update
+grep -Fqx "$work/bin/alacritty" "$work/custom-fallback-out"
+grep -Fqx 'font.size=9' "$work/custom-fallback-out"
+
+# Test explicit override via DWM_UPDATE_CENTER_TERMINAL
+DWM_TERMINAL_TEST_OUT="$work/explicit-override-out" \
+	DWM_UPDATE_CENTER_TERMINAL=custom-term \
+	PATH="$work/bin" \
+	"$BASH_BIN" "$HELPER" --update-center /usr/bin/dwm-update-center-terminal op-00000000000000000000000000000000 fedora update
+grep -Fqx "$work/bin/custom-term" "$work/explicit-override-out"
+
+sed -i 's/terminal = "custom-term"/terminal = "alacritty"/' \
+	"$XDG_CONFIG_HOME/dwm-fox/hotkeys.toml"
+
+sed -i 's/terminal = "alacritty"/terminal = "kitty"/' \
+	"$XDG_CONFIG_HOME/dwm-fox/hotkeys.toml"
+DWM_TERMINAL_TEST_OUT="$work/configured-out" \
+	PATH="$work/bin" \
+	"$BASH_BIN" "$HELPER" --print-command >"$work/configured-command"
+sed -i 's/terminal = "kitty"/terminal = "dwmterm"/' \
+	"$XDG_CONFIG_HOME/dwm-fox/hotkeys.toml"
+cat >"$work/bin/dwmterm" <<'SCRIPT'
+#!/bin/sh
+printf '%s\n' "$0" >"$DWM_TERMINAL_TEST_OUT"
+printf '%s\n' "$@" >>"$DWM_TERMINAL_TEST_OUT"
+SCRIPT
+chmod +x "$work/bin/dwmterm"
+
+DWM_TERMINAL_TEST_OUT="$work/dwmterm-configured-out" \
+	PATH="$work/bin" \
+	"$BASH_BIN" "$HELPER" --print-command >"$work/dwmterm-configured-command"
+grep -Fqx dwmterm "$work/dwmterm-configured-command"
+rm -f "$work/bin/dwmterm"
+sed -i 's/terminal = "dwmterm"/terminal = "alacritty"/' \
+	"$XDG_CONFIG_HOME/dwm-fox/hotkeys.toml"
+
+cat >>"$XDG_CONFIG_HOME/dwm-fox/hotkeys.toml" <<'EOF'
+[malformed-section
+terminal = "kitty"
+EOF
+DWM_TERMINAL_TEST_OUT="$work/section-out" \
+	PATH="$work/bin" \
+	"$BASH_BIN" "$HELPER" --print-command >"$work/section-command"
+grep -Fqx alacritty "$work/section-command"
+
+cat >"$work/bin/herdr" <<'SCRIPT'
+#!/bin/sh
+exit 0
+SCRIPT
+chmod +x "$work/bin/herdr"
+
+DWM_TERMINAL_TEST_OUT="$work/default-out" \
+	PATH="$work/bin" \
+	"$BASH_BIN" "$HELPER"
+
+grep -Fqx "$work/bin/alacritty" "$work/default-out"
+if grep -Fqx -- "-e" "$work/default-out"; then
+	echo "dwm-terminal launched Herdr without an explicit opt-in" >&2
+	exit 1
+fi
+
+DWM_TERMINAL_TEST_OUT="$work/herdr-out" \
+	DWM_HERDR=1 \
+	PATH="$work/bin" \
+	"$BASH_BIN" "$HELPER"
+
+grep -Fqx "$work/bin/alacritty" "$work/herdr-out"
+grep -Fqx -- "-e" "$work/herdr-out"
+grep -Fqx "$work/bin/herdr" "$work/herdr-out"
+
+DWM_TERMINAL_TEST_OUT="$work/direct-out" \
+	PATH="$work/bin" \
+	"$BASH_BIN" "$HELPER" -e sh -c "printf direct"
+
+grep -Fqx "$work/bin/alacritty" "$work/direct-out"
+grep -Fqx -- "-e" "$work/direct-out"
+grep -Fqx "sh" "$work/direct-out"
+if grep -Fqx "$work/bin/herdr" "$work/direct-out"; then
+	echo "dwm-terminal wrapped an explicit command in Herdr" >&2
+	exit 1
+fi
+
+DWM_TERMINAL_TEST_OUT="$work/disabled-out" \
+	DWM_HERDR=0 \
+	PATH="$work/bin" \
+	"$BASH_BIN" "$HELPER"
+
+if grep -Fqx -- "-e" "$work/disabled-out"; then
+	echo "dwm-terminal launched Herdr while DWM_HERDR=0" >&2
+	exit 1
+fi
+
+cat >"$work/bin/custom-term" <<'SCRIPT'
+#!/bin/sh
+printf 'custom\n' >"$DWM_TERMINAL_TEST_OUT"
+SCRIPT
+chmod +x "$work/bin/custom-term"
+
+DWM_TERMINAL_TEST_OUT="$work/custom-out" \
+	DWM_TERMINAL=custom-term \
+	PATH="$work/bin" \
+	"$BASH_BIN" "$HELPER"
+
+grep -Fqx "custom" "$work/custom-out"
+
+printf '%s\n' '[vars]' 'terminal = not-quoted' \
+	>"$XDG_CONFIG_HOME/dwm-fox/hotkeys.toml"
+DWM_TERMINAL_TEST_OUT="$work/malformed-out" \
+	PATH="$work/bin" \
+	"$BASH_BIN" "$HELPER"
+grep -Fqx "$work/bin/alacritty" "$work/malformed-out"
+
+rm -f "$work/bin/alacritty" "$work/bin/kitty" "$work/bin/custom-term" "$work/bin/herdr"
+
+if PATH="$work/bin" "$BASH_BIN" "$HELPER" 2>"$work/err"; then
+	echo "dwm-terminal succeeded without a terminal" >&2
+	exit 1
+fi
+
+grep -Fq "no supported terminal emulator found" "$work/err"
+
+grep -Eq '^[[:space:]]*terminal[[:space:]]*=[[:space:]]*"alacritty"' \
+	"$ROOT_DIR/config/hotkeys.toml"
+grep -Fq 'key="x",       desc="Terminal"' "$ROOT_DIR/config/hotkeys.toml"

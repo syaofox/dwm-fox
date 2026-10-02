@@ -1,0 +1,674 @@
+#!/bin/sh
+set -eu
+
+DISPLAY=${DISPLAY:-:fixture}
+export DISPLAY
+
+repo=$(
+	unset CDPATH
+	cd -- "$(dirname -- "$0")/.." && pwd
+)
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+test_uid=$(id -u)
+
+mkdir -p "$work/bin" "$work/config/dwm-fox" "$work/home/Pictures/backgrounds" \
+	"$work/data/dwm-fox/config/quickshell" "$work/state" "$work/runtime" "$work/power-state"
+mkdir -p "$work/config/quickshell"
+cp "$repo/config/themes.toml" "$work/config/dwm-fox/themes.toml"
+cp "$repo/config/themes.toml" "$work/data/dwm-fox/config/themes.toml"
+cp "$repo/config/hotkeys.toml" "$work/config/dwm-fox/hotkeys.toml"
+: >"$work/data/dwm-fox/config/quickshell/shell.qml"
+: >"$work/config/quickshell/shell.qml"
+: >"$work/home/Pictures/backgrounds/wallpaper.png"
+
+stub_command() {
+	name=$1
+	cat >"$work/bin/$name" <<'SH'
+#!/bin/sh
+printf '%s %s\n' "$(basename "$0")" "$*" >>"$DWM_TEST_LOG"
+SH
+	chmod +x "$work/bin/$name"
+}
+
+for name in quickshell xprop dwm-quickshell-launcher dwm-quickshell-controlcenter dex picom dwm-settings-picom feh maim notify-send pactl brightnessctl xset gsettings light-locker setsid dwm-terminal dwm-default-apps dwm-settings-wallpaper xdg-open nwg-look pkill pgrep dnf; do
+	stub_command "$name"
+done
+
+cat >"$work/bin/quickshell" <<'SH'
+#!/bin/sh
+case ${1:-} in
+--version) printf 'quickshell %s\n' "${DWM_TEST_QUICKSHELL_VERSION:-0.3.0}" ;;
+*) printf 'quickshell %s\n' "$*" >>"${DWM_TEST_LOG:?}" ;;
+esac
+SH
+chmod +x "$work/bin/quickshell"
+
+cat >"$work/bin/nwg-look" <<'SH'
+#!/bin/sh
+printf 'nwg-look %s\n' "$*" >>"${DWM_TEST_LOG:?}"
+if [ -n "${DWM_TEST_THEME_ENV_LOG:-}" ]; then
+	printf '%s\t%s\t%s\n' "${QT_QPA_PLATFORMTHEME:-}" "${XCURSOR_THEME:-}" \
+		"${XCURSOR_SIZE:-}" >"$DWM_TEST_THEME_ENV_LOG"
+fi
+SH
+chmod +x "$work/bin/nwg-look"
+
+cat >"$work/bin/pkill" <<'SH'
+#!/bin/sh
+printf 'pkill %s\n' "$*" >>"${DWM_TEST_LOG:?}"
+case $* in
+*"-x light-locker"*) rm -f "${DWM_TEST_POWER_STATE:?}/light-locker.running" ;;
+esac
+SH
+chmod +x "$work/bin/pkill"
+
+cat >"$work/bin/pgrep" <<'SH'
+#!/bin/sh
+case "$*" in
+"-x picom")
+	exit "${DWM_TEST_PICOM_RUNNING:-1}"
+	;;
+*"-x light-locker"*)
+	test -f "${DWM_TEST_POWER_STATE:?}/light-locker.running"
+	;;
+*)
+	exit 1
+	;;
+esac
+SH
+chmod +x "$work/bin/pgrep"
+
+cat >"$work/bin/xset" <<'SH'
+#!/bin/sh
+state=${DWM_TEST_POWER_STATE:?}
+log=${DWM_TEST_LOG:?}
+mkdir -p "$state"
+
+read_state() {
+	name=$1
+	default=$2
+	if [ -f "$state/$name" ]; then
+		cat "$state/$name"
+	else
+		printf '%s\n' "$default"
+	fi
+}
+
+case ${1:-} in
+q)
+	dpms_enabled=$(read_state dpms_enabled 0)
+	dpms_timeout=$(read_state dpms_timeout 600)
+	saver_timeout=$(read_state saver_timeout 0)
+	if [ "$dpms_enabled" = 1 ]; then
+		dpms_text=Enabled
+	else
+		dpms_text=Disabled
+	fi
+	cat <<EOF
+Screen Saver:
+  prefer blanking:  no    allow exposures:  yes
+  timeout:  $saver_timeout    cycle:  600
+DPMS (Display Power Management Signaling):
+  Standby: $dpms_timeout    Suspend: $dpms_timeout    Off: $dpms_timeout
+  DPMS is $dpms_text
+EOF
+	;;
++dpms)
+	printf '1\n' >"$state/dpms_enabled"
+	printf 'xset %s\n' "$*" >>"$log"
+	;;
+-dpms)
+	printf '0\n' >"$state/dpms_enabled"
+	printf 'xset %s\n' "$*" >>"$log"
+	;;
+dpms)
+	printf '%s\n' "${4:-600}" >"$state/dpms_timeout"
+	printf 'xset %s\n' "$*" >>"$log"
+	;;
+s)
+	case ${2:-} in
+	off) printf '0\n' >"$state/saver_timeout" ;;
+	noblank) : ;;
+	*[!0-9]* | "") : ;;
+	*) printf '%s\n' "$2" >"$state/saver_timeout" ;;
+	esac
+	printf 'xset %s\n' "$*" >>"$log"
+	;;
+*)
+	printf 'xset %s\n' "$*" >>"$log"
+	;;
+esac
+SH
+chmod +x "$work/bin/xset"
+
+cat >"$work/bin/gsettings" <<'SH'
+#!/bin/sh
+state=${DWM_TEST_POWER_STATE:?}
+log=${DWM_TEST_LOG:?}
+mkdir -p "$state"
+
+case ${1:-} in
+get)
+	case ${2:-}:${3:-} in
+	apps.light-locker:lock-after-screensaver)
+		if [ -f "$state/lock_after" ]; then
+			printf 'uint32 %s\n' "$(cat "$state/lock_after")"
+		else
+			printf 'uint32 0\n'
+		fi
+		;;
+	apps.light-locker:lock-on-suspend)
+		if [ -f "$state/lock_on_suspend" ]; then
+			cat "$state/lock_on_suspend"
+		else
+			printf 'true\n'
+		fi
+		;;
+	*) exit 1 ;;
+	esac
+	;;
+set)
+	printf 'gsettings %s\n' "$*" >>"$log"
+	case ${2:-}:${3:-} in
+	apps.light-locker:lock-after-screensaver)
+		printf '%s\n' "${4:-0}" >"$state/lock_after"
+		;;
+	apps.light-locker:lock-on-suspend)
+		printf '%s\n' "${4:-false}" >"$state/lock_on_suspend"
+		;;
+	*) exit 1 ;;
+	esac
+	;;
+*)
+	printf 'gsettings %s\n' "$*" >>"$log"
+	;;
+esac
+SH
+chmod +x "$work/bin/gsettings"
+
+cat >"$work/bin/light-locker" <<'SH'
+#!/bin/sh
+printf 'light-locker %s\n' "$*" >>"${DWM_TEST_LOG:?}"
+: >"${DWM_TEST_POWER_STATE:?}/light-locker.running"
+SH
+chmod +x "$work/bin/light-locker"
+
+cat >"$work/bin/pactl" <<'SH'
+#!/bin/sh
+case "$*" in
+info)
+	printf 'Server Name: PipeWire\n'
+	;;
+*)
+	printf 'pactl %s\n' "$*" >>"$DWM_TEST_LOG"
+	;;
+esac
+SH
+chmod +x "$work/bin/pactl"
+
+cat >"$work/bin/theme-apply-stub" <<'SH'
+#!/bin/sh
+exit 0
+SH
+chmod +x "$work/bin/theme-apply-stub"
+
+run_helper() {
+	DWM_TEST_LOG="$work/actions.log" \
+		DWM_TEST_SYNC=1 \
+		HOME="$work/home" \
+		XDG_CONFIG_HOME="$work/config" \
+		XDG_DATA_HOME="$work/data" \
+		XDG_STATE_HOME="$work/state" \
+		XDG_RUNTIME_DIR="$work/runtime" \
+		DWM_APPEARANCE_APPLY_HELPER="$work/bin/theme-apply-stub" \
+		DWM_TEST_POWER_STATE="$work/power-state" \
+		DWM_TEST_MODE=1 \
+		DWM_TEST_QUICKSHELL_VERSION="${DWM_TEST_QUICKSHELL_VERSION:-0.3.0}" \
+		DWM_HEALTH_COMMAND_TIMEOUT=2 \
+		PATH="${DWM_TEST_PATH:-$work/bin:/usr/bin:/bin}" \
+		"$repo/scripts/dwm-quickshell-controlcenter" "$@"
+}
+
+health=$(run_helper health)
+printf '%s\n' "$health" | grep -Fqx 'ok	Quickshell	Available'
+printf '%s\n' "$health" | grep -Fqx 'ok	xset	xset is available'
+printf '%s\n' "$health" | grep -Fqx 'ok	light-locker	light-locker is available'
+printf '%s\n' "$health" | grep -Fqx 'ok	Themes configuration	Readable'
+printf '%s\n' "$health" | grep -Fqx 'ok	Quickshell configuration	Readable'
+
+fedora_health=$(DWM_TEST_QUICKSHELL_VERSION='0.2.1, revision dacfa9de829ac7cb173825f593236bf2c21f637e' run_helper health)
+printf '%s\n' "$fedora_health" | grep -Fqx "$(printf 'ok\tQuickshell\tAvailable')"
+DWM_TEST_MODE=1 DWM_TEST_QUICKSHELL_VERSION='0.2.1^git20260209.dacfa9d-3.fc44' \
+	"$repo/scripts/dwm-quickshell-version-check"
+DWM_TEST_MODE=1 DWM_TEST_QUICKSHELL_VERSION='0.2.1, revision dacfa9de829ac7cb173825f593236bf2c21f637e' \
+	"$repo/scripts/dwm-quickshell-version-check"
+DWM_TEST_MODE=1 DWM_TEST_QUICKSHELL_VERSION='quickshell pre-release, revision: dacfa9de829ac7cb173825f593236bf2c21f637e' \
+	"$repo/scripts/dwm-quickshell-version-check"
+DWM_TEST_MODE=1 DWM_TEST_QUICKSHELL_VERSION=0.3.0 \
+	"$repo/scripts/dwm-quickshell-version-check"
+for unsupported_snapshot in \
+	0.2.1^git20260209.dacfa9d-3.fc43 \
+	0.2.1^git20260209.dacfa9d-3.fc45 \
+	0.2.1^git20260209.dacfa9d; do
+	if DWM_TEST_MODE=1 DWM_TEST_QUICKSHELL_VERSION=$unsupported_snapshot \
+		"$repo/scripts/dwm-quickshell-version-check" 2>/dev/null; then
+		printf 'Version check accepted snapshot outside the Fedora 44 contract: %s.\n' \
+			"$unsupported_snapshot" >&2
+		exit 1
+	fi
+done
+if DWM_TEST_MODE=1 DWM_TEST_QUICKSHELL_VERSION=0.2.1 \
+	"$repo/scripts/dwm-quickshell-version-check" 2>"$work/quickshell-version.err"; then
+	printf 'Version check accepted unsupported upstream Quickshell 0.2.1.\n' >&2
+	exit 1
+fi
+grep -Fq 'unsupported Quickshell version: 0.2.1' "$work/quickshell-version.err"
+
+outdated_health=$(DWM_TEST_QUICKSHELL_VERSION=0.2.1 run_helper health)
+printf '%s\n' "$outdated_health" | grep -Fqx 'error	Quickshell	Outdated'
+fc43_health=$(DWM_TEST_QUICKSHELL_VERSION=0.2.1^git20260209.dacfa9d-3.fc43 run_helper health)
+printf '%s\n' "$fc43_health" | grep -Fqx 'error	Quickshell	Outdated'
+
+sed -i 's/^\[active\]$/  [active] # retained header comment/' \
+	"$work/config/dwm-fox/themes.toml"
+sed -i 's/^\[theme.dracula\]$/  [theme.dracula] # retained theme comment/' \
+	"$work/config/dwm-fox/themes.toml"
+
+info=$(run_helper info)
+printf '%s\n' "$info" | grep -Fqx 'Theme	nord'
+printf '%s\n' "$info" | grep -Fqx 'Audio	PipeWire'
+
+themes=$(run_helper themes)
+printf '%s\n' "$themes" | grep -Fqx 'active	nord'
+printf '%s\n' "$themes" | grep -Fqx 'available	dracula'
+
+run_helper theme-set dracula >"$work/theme-set.out"
+grep -Fqx 'theme	dracula' "$work/theme-set.out"
+grep -Fq 'theme = "dracula"' "$work/config/dwm-fox/themes.toml"
+
+if run_helper theme-set missing-theme 2>"$work/theme-set.err"; then
+	exit 1
+fi
+grep -Fq 'theme is unavailable, invalid, or the source is unsafe to mutate: missing-theme' \
+	"$work/theme-set.err"
+
+mkdir -p "$work/prefix/bin"
+cp "$repo/scripts/dwm-quickshell-controlcenter" "$repo/scripts/dwm-session-launch" \
+	"$work/prefix/bin/"
+rm "$work/config/dwm-fox/themes.toml"
+installed_themes=$(HOME="$work/home" XDG_CONFIG_HOME="$work/config" \
+	XDG_DATA_HOME="$work/data" "$work/prefix/bin/dwm-quickshell-controlcenter" themes)
+printf '%s\n' "$installed_themes" | grep -Fqx 'active	nord'
+printf '%s\n' "$installed_themes" | grep -Fqx 'available	dracula'
+cp "$work/data/dwm-fox/config/themes.toml" "$work/config/dwm-fox/themes.toml"
+printf '%s\n' 'export QT_QPA_PLATFORMTHEME=qt6ct' \
+	'export XCURSOR_THEME=Custom-Cursor' 'export XCURSOR_SIZE=32' \
+	>"$work/config/dwm-fox/theme-env.sh"
+DWM_TEST_LOG="$work/actions.log" DWM_TEST_SYNC=1 \
+	DWM_TEST_THEME_ENV_LOG="$work/custom-prefix-theme-env.log" \
+	HOME="$work/home" XDG_CONFIG_HOME="$work/config" XDG_RUNTIME_DIR="$work/runtime" \
+	QT_QPA_PLATFORMTHEME=gtk3 XCURSOR_THEME=Old-Cursor XCURSOR_SIZE=24 \
+	PATH="$work/bin:/usr/bin:/bin" \
+	"$work/prefix/bin/dwm-quickshell-controlcenter" action gtk-settings >/dev/null
+grep -Fqx "$(printf 'qt6ct\tCustom-Cursor\t32')" \
+	"$work/custom-prefix-theme-env.log"
+
+rm "$work/config/dwm-fox/themes.toml" "$work/data/dwm-fox/config/themes.toml"
+run_helper theme-set dracula >"$work/theme-set-source.out"
+grep -Fqx 'theme	dracula' "$work/theme-set-source.out"
+grep -Fq 'theme = "dracula"' "$work/config/dwm-fox/themes.toml"
+
+keybinds=$(run_helper keybinds)
+printf '%s\n' "$keybinds" | grep -Fqx 'Super + r	App launcher'
+printf '%s\n' "$keybinds" | grep -Fqx 'Super + F1	Control center'
+printf '%s\n' "$keybinds" | grep -Fqx 'Super + 0	Show all tags'
+if printf '%s\n' "$keybinds" | grep -Fq 'Super + Alt + 0'; then
+	printf 'Legacy tag-10 show-all binding is still exposed.\n' >&2
+	exit 1
+fi
+grep -Fq 'title: "dwm control center utility"' \
+	"$repo/config/quickshell/controlcenter/UtilityDetailWindow.qml"
+grep -Fq '{ title="dwm control center utility", isfloating=1, alwaysontop=1 }' \
+	"$repo/config/window-rules.toml"
+
+power=$(run_helper power-status)
+printf '%s\n' "$power" | grep -Fqx 'dpms_available	1'
+printf '%s\n' "$power" | grep -Fqx 'dpms_enabled	0'
+printf '%s\n' "$power" | grep -Fqx 'lock_available	1'
+printf '%s\n' "$power" | grep -Fqx 'lock_enabled	0'
+
+# Without a managed power.conf, preserve a user or distro-managed locker.
+: >"$work/power-state/light-locker.running"
+: >"$work/actions.log"
+run_helper power-apply
+test -e "$work/power-state/light-locker.running"
+if grep -Fq 'pkill -u ' "$work/actions.log"; then
+	exit 1
+fi
+rm -f "$work/power-state/light-locker.running"
+
+: >"$work/actions.log"
+run_helper power-dpms-timeout 900 >"$work/power-dpms-timeout.out"
+grep -Fqx 'power-dpms-timeout	900' "$work/power-dpms-timeout.out"
+grep -Fq 'dpms_enabled=1' "$work/config/dwm-fox/power.conf"
+grep -Fq 'dpms_timeout=900' "$work/config/dwm-fox/power.conf"
+grep -Fqx 'xset +dpms' "$work/actions.log"
+grep -Fqx 'xset dpms 900 900 900' "$work/actions.log"
+power=$(run_helper power-status)
+printf '%s\n' "$power" | grep -Fqx 'dpms_enabled	1'
+printf '%s\n' "$power" | grep -Fqx 'dpms_timeout	900'
+
+: >"$work/actions.log"
+run_helper power-lock-timeout 300 >"$work/power-lock-timeout.out"
+grep -Fqx 'power-lock-timeout	300' "$work/power-lock-timeout.out"
+grep -Fq 'lock_enabled=1' "$work/config/dwm-fox/power.conf"
+grep -Fq 'lock_timeout=300' "$work/config/dwm-fox/power.conf"
+grep -Fqx 'xset s 300' "$work/actions.log"
+grep -Fqx 'gsettings set apps.light-locker lock-after-screensaver 5' "$work/actions.log"
+grep -Fqx 'gsettings set apps.light-locker lock-on-suspend true' "$work/actions.log"
+grep -Fqx 'light-locker ' "$work/actions.log"
+power=$(run_helper power-status)
+printf '%s\n' "$power" | grep -Fqx 'lock_enabled	1'
+printf '%s\n' "$power" | grep -Fqx 'lock_timeout	300'
+printf '%s\n' "$power" | grep -Fqx 'lock_running	1'
+
+: >"$work/actions.log"
+run_helper power-lock off >"$work/power-lock-off.out"
+grep -Fqx 'power-lock	0' "$work/power-lock-off.out"
+grep -Fq 'lock_enabled=0' "$work/config/dwm-fox/power.conf"
+grep -Fqx 'xset s off' "$work/actions.log"
+grep -Fqx 'xset s noblank' "$work/actions.log"
+grep -Fqx 'gsettings set apps.light-locker lock-after-screensaver 0' "$work/actions.log"
+grep -Fqx 'gsettings set apps.light-locker lock-on-suspend false' "$work/actions.log"
+grep -Fqx "pkill -u $test_uid -x light-locker --env DISPLAY=$DISPLAY" "$work/actions.log"
+test ! -e "$work/power-state/light-locker.running"
+
+# Persisted settings remain authoritative when X11 or light-locker state drifts.
+printf '0\n' >"$work/power-state/dpms_enabled"
+printf '60\n' >"$work/power-state/dpms_timeout"
+printf '600\n' >"$work/power-state/saver_timeout"
+printf '5\n' >"$work/power-state/lock_after"
+printf 'true\n' >"$work/power-state/lock_on_suspend"
+: >"$work/power-state/light-locker.running"
+: >"$work/actions.log"
+run_helper power-apply
+grep -Fqx 'xset +dpms' "$work/actions.log"
+grep -Fqx 'xset dpms 900 900 900' "$work/actions.log"
+grep -Fqx 'xset s off' "$work/actions.log"
+grep -Fqx 'xset s noblank' "$work/actions.log"
+grep -Fqx 'gsettings set apps.light-locker lock-after-screensaver 0' "$work/actions.log"
+grep -Fqx 'gsettings set apps.light-locker lock-on-suspend false' "$work/actions.log"
+grep -Fqx 'false' "$work/power-state/lock_on_suspend"
+grep -Fqx "pkill -u $test_uid -x light-locker --env DISPLAY=$DISPLAY" "$work/actions.log"
+test ! -e "$work/power-state/light-locker.running"
+
+: >"$work/actions.log"
+run_helper action restart-quickshell >"$work/quickshell.out"
+grep -Fqx 'action	restart-quickshell' "$work/quickshell.out"
+if DWM_TEST_QUICKSHELL_VERSION=0.2.1 run_helper action restart-quickshell \
+	>"$work/quickshell-outdated.out" 2>"$work/quickshell-outdated.err"; then
+	printf 'Restart accepted an unsupported Quickshell version.\n' >&2
+	exit 1
+fi
+grep -Fq 'compatible Quickshell 0.3.0 or Fedora 44 snapshot is required' \
+	"$work/quickshell-outdated.err"
+grep -Fq 'pkill -x quickshell' "$work/actions.log"
+grep -Fq 'quickshell --no-duplicate' "$work/actions.log"
+
+: >"$work/actions.log"
+run_helper action restart-picom >"$work/picom.out"
+grep -Fqx 'action	restart-picom' "$work/picom.out"
+grep -Fqx 'dwm-settings-picom restart' "$work/actions.log"
+
+: >"$work/actions.log"
+run_helper action open-wallpapers >"$work/wallpapers.out"
+grep -Fqx 'action	open-wallpapers' "$work/wallpapers.out"
+grep -Fq "xdg-open $work/home/Pictures/backgrounds" "$work/actions.log"
+
+: >"$work/actions.log"
+run_helper action gtk-settings >"$work/gtk-settings.out"
+grep -Fqx 'action	gtk-settings' "$work/gtk-settings.out"
+grep -Fqx 'nwg-look ' "$work/actions.log"
+rm -f "$work/bin/nwg-look"
+mkdir -p "$work/no-nwg-look-bin"
+ln -s "$(command -v dirname)" "$work/no-nwg-look-bin/dirname"
+if DWM_TEST_PATH="$work/no-nwg-look-bin" \
+	run_helper action gtk-settings 2>"$work/gtk-settings.err"; then
+	exit 1
+fi
+grep -Fqx 'nwg-look is unavailable' "$work/gtk-settings.err"
+
+: >"$work/actions.log"
+run_helper action reload-wallpaper >"$work/reload-wallpaper.out"
+grep -Fqx 'action	reload-wallpaper' "$work/reload-wallpaper.out"
+grep -Fqx 'dwm-settings-wallpaper randomize' "$work/actions.log"
+if grep -Fq 'feh --randomize --bg-fill' "$work/actions.log"; then
+	printf 'Managed wallpaper reload bypassed the settings helper\n' >&2
+	exit 1
+fi
+
+: >"$work/actions.log"
+DWM_SETTINGS_WALLPAPER_HELPER=$work/missing-wallpaper-helper \
+	run_helper action reload-wallpaper >"$work/legacy-reload-wallpaper.out"
+grep -Fq "feh --randomize --bg-fill $work/home/Pictures/backgrounds/wallpaper.png" \
+	"$work/actions.log"
+
+rm -f "$work/home/Pictures/backgrounds/wallpaper.png"
+if DWM_SETTINGS_WALLPAPER_HELPER=$work/missing-wallpaper-helper \
+	run_helper action reload-wallpaper 2>"$work/reload-wallpaper.err"; then
+	exit 1
+fi
+grep -Fqx "no loadable wallpaper images found in $work/home/Pictures/backgrounds" "$work/reload-wallpaper.err"
+
+if run_helper action not-real 2>"$work/action.err"; then
+	exit 1
+fi
+grep -Fqx 'unknown action: not-real' "$work/action.err"
+
+# Self-Heal passes an executable path as one argv value, including punctuation.
+self_heal_script="$work/self heal 'quoted';.sh"
+cat >"$self_heal_script" <<'SH'
+#!/bin/sh
+printf 'self-heal invoked\n'
+exit "${DWM_TEST_SELF_HEAL_STATUS:-0}"
+SH
+chmod +x "$self_heal_script"
+cp "$work/bin/dwm-terminal" "$work/bin/dwm-terminal.saved"
+cat >"$work/bin/dwm-terminal" <<'SH'
+#!/bin/sh
+if [ "$1" = --print-command ]; then
+	exit "${DWM_TEST_TERMINAL_STATUS:-0}"
+fi
+[ "$1" = -e ] || exit 2
+shift
+exec "$@"
+SH
+chmod +x "$work/bin/dwm-terminal"
+printf '%s\n' "$self_heal_script" >"$work/config/dwm-fox/self-heal.path"
+printf '\n' | run_helper action self-heal >"$work/self-heal.out"
+grep -Fqx 'self-heal invoked' "$work/self-heal.out"
+grep -Fq 'Self-Heal exited with status 0.' "$work/self-heal.out"
+status=0
+printf '\n' | DWM_TEST_SELF_HEAL_STATUS=7 run_helper action self-heal >"$work/self-heal-fail.out" || status=$?
+[ "$status" -eq 7 ]
+if DWM_SELF_HEAL_SCRIPT="$work/missing" run_helper action self-heal 2>"$work/self-heal-missing.err"; then
+	exit 1
+fi
+grep -Fq 'Self-Heal script is not executable' "$work/self-heal-missing.err"
+if DWM_TEST_TERMINAL_STATUS=127 run_helper action self-heal \
+	>"$work/self-heal-no-terminal.out" 2>"$work/self-heal-no-terminal.err"; then
+	printf 'Self-Heal accepted an unavailable terminal backend\n' >&2
+	exit 1
+fi
+[ ! -s "$work/self-heal-no-terminal.out" ]
+grep -Fq 'Self-Heal requires an available terminal' "$work/self-heal-no-terminal.err"
+rm "$work/config/dwm-fox/self-heal.path"
+mv "$work/bin/dwm-terminal.saved" "$work/bin/dwm-terminal"
+
+grep -Fq 'watchChanges: true' "$repo/config/quickshell/appearance/AppearanceModel.qml"
+[ "$(grep -Fc 'watchChanges: true' "$repo/config/quickshell/appearance/AppearanceModel.qml")" -eq 6 ]
+[ "$(grep -Fc 'onFileChanged: reload()' "$repo/config/quickshell/appearance/AppearanceModel.qml")" -eq 7 ]
+grep -Fq 'themes.toml' "$repo/config/quickshell/appearance/AppearanceModel.qml"
+grep -Fq 'ClickAwayPopup {' "$repo/config/quickshell/controlcenter/ControlCenterWindow.qml"
+grep -Fq 'onDismissed: controlCenterModel.close()' "$repo/config/quickshell/controlcenter/ControlCenterWindow.qml"
+grep -Fq 'grabFocus: true' "$repo/config/quickshell/core/ClickAwayPopup.qml"
+grep -Fq 'function applyAppearanceColors(colors, darkMode)' "$repo/config/quickshell/core/Theme.qml"
+grep -Fq 'root.text = colors.text' "$repo/config/quickshell/core/Theme.qml"
+grep -Fq 'label: root.delegated ? "Advanced" : root.busy ? "Connecting..." : "Connect"' "$repo/config/quickshell/network/NetworkWifiRow.qml"
+grep -Fq 'property bool wifiPasswordPromptVisible: false' "$repo/config/quickshell/network/NetworkModel.qml"
+grep -Fq 'root.wifiPasswordPromptVisible = true;' "$repo/config/quickshell/network/NetworkModel.qml"
+grep -Fq 'root.networkModel.cancelWifiPasswordPrompt()' "$repo/config/quickshell/network/NetworkWindow.qml"
+grep -Fq 'wifiPasswordInput.forceActiveFocus();' "$repo/config/quickshell/network/NetworkWindow.qml"
+grep -Fq 'visible: panelWindow !== null && panelWindow.screen !== null' "$repo/config/quickshell/network/NetworkWindow.qml"
+grep -Fq 'enabled: !root.networkModel.wifiPasswordPromptVisible' "$repo/config/quickshell/network/NetworkWindow.qml"
+grep -Fq 'grabFocus: !networkModel.wifiPasswordPromptVisible' "$repo/config/quickshell/network/NetworkWindow.qml"
+grep -Fq 'FloatingWindow {' "$repo/config/quickshell/network/NetworkWindow.qml"
+grep -Fq 'title: "dwm network password"' "$repo/config/quickshell/network/NetworkWindow.qml"
+grep -Fq '{ title="dwm network password",     isfloating=1, alwaysontop=1 }' \
+	"$repo/config/window-rules.toml"
+grep -Fq 'screen: root.panelWindow ? root.panelWindow.screen : null' "$repo/config/quickshell/network/NetworkWindow.qml"
+grep -Fq 'model: Quickshell.screens' "$repo/config/quickshell/shell.qml"
+grep -Fq 'screen: modelData' "$repo/config/quickshell/shell.qml"
+grep -Fq 'function selectPanelPopup(panel, popupId)' "$repo/config/quickshell/shell.qml"
+grep -Fq 'if (popupId !== "network") networkModel.close();' "$repo/config/quickshell/shell.qml"
+grep -Fq 'onPopupRequested: (panel, popupId) => root.requestPanelPopup(panel, popupId)' "$repo/config/quickshell/shell.qml"
+grep -Fq 'readonly property var activePanelWindow: selectedPanelWindow && selectedPanelWindow.screen' "$repo/config/quickshell/shell.qml"
+grep -Fq 'signal popupRequested(var panelWindow, string popupId)' "$repo/config/quickshell/panel/DwmPanel.qml"
+grep -Fq 'model: root.state.workspaceIndexes(root.screen)' "$repo/config/quickshell/panel/DwmPanel.qml"
+grep -Fq 'selected: modelData === root.state.currentWorkspaceForScreen(root.screen)' "$repo/config/quickshell/panel/DwmPanel.qml"
+grep -Fq 'onClicked: root.state.switchWorkspaceForScreen(root.screen, modelData)' "$repo/config/quickshell/panel/DwmPanel.qml"
+grep -Fq 'screen.devicePixelRatio' "$repo/config/quickshell/state/DwmState.qml"
+grep -Fq 'Math.round(screen.x)' "$repo/config/quickshell/state/DwmState.qml"
+grep -Fq 'Math.round(screen.y)' "$repo/config/quickshell/state/DwmState.qml"
+grep -Fq 'Math.round(screen.width * pixelRatio)' "$repo/config/quickshell/state/DwmState.qml"
+if grep -Eq 'screen\.(x|y) \* pixelRatio' "$repo/config/quickshell/state/DwmState.qml"; then
+	exit 1
+fi
+grep -Fq 'root.monitorWorkspaceRows.length > 0' "$repo/config/quickshell/state/DwmState.qml"
+grep -Fq 'property var monitorWorkspaceRows: []' "$repo/config/quickshell/state/DwmState.qml"
+grep -Fq 'function workspaceIndexes(screen)' "$repo/config/quickshell/state/DwmState.qml"
+grep -Fq 'function currentWorkspaceForScreen(screen)' "$repo/config/quickshell/state/DwmState.qml"
+grep -Fq 'function switchWorkspaceForScreen(screen, index)' "$repo/config/quickshell/state/DwmState.qml"
+grep -Fq 'root.launcherModel.openOnScreen(targetScreen);' "$repo/config/quickshell/controlcenter/ControlCenterWindow.qml"
+grep -Fq 'root.settingsModel.openOnScreen(targetScreen);' "$repo/config/quickshell/controlcenter/ControlCenterWindow.qml"
+grep -Fq 'root.controlCenterModel.openKeybindsOnScreen(targetScreen);' "$repo/config/quickshell/controlcenter/ControlCenterWindow.qml"
+grep -Fq 'root.controlCenterModel.openInfoOnScreen(targetScreen);' "$repo/config/quickshell/controlcenter/ControlCenterWindow.qml"
+grep -Fq 'screen: launcherModel.targetScreen' "$repo/config/quickshell/launcher/LauncherWindow.qml"
+grep -Fq 'screen: settingsModel.targetScreen' "$repo/config/quickshell/settings/SettingsWindow.qml"
+grep -Fq 'screen: controlCenterModel.utilityScreen' "$repo/config/quickshell/controlcenter/UtilityDetailWindow.qml"
+grep -Fq 'onClosed: root.networkModel.cancelWifiPasswordPrompt()' "$repo/config/quickshell/network/NetworkWindow.qml"
+grep -Fq 'function cancelWifiPasswordPrompt()' "$repo/config/quickshell/network/NetworkModel.qml"
+grep -Fq 'return profile.active;' "$repo/config/quickshell/network/NetworkModel.qml"
+grep -Fq 'root.wifiPasswordPromptVisible && root.selectedWifiIndex < 0' "$repo/config/quickshell/network/NetworkModel.qml"
+grep -Fq 'args.push("--password-stdin");' "$repo/config/quickshell/network/NetworkModel.qml"
+grep -Fq 'args.push(network.security);' "$repo/config/quickshell/network/NetworkModel.qml"
+grep -Fq 'stdinEnabled: true' "$repo/config/quickshell/network/NetworkModel.qml"
+test "$(grep -Fc 'root.busy || actionProcess.running' "$repo/config/quickshell/network/NetworkModel.qml")" -eq 4
+if grep -Fq 'args.push(root.wifiPassword)' "$repo/config/quickshell/network/NetworkModel.qml"; then
+	exit 1
+fi
+select_wifi_guard=$(
+	sed -n '/if (root.selectedWifiIndex === index) {/,/^[[:space:]]*}/p' \
+		"$repo/config/quickshell/network/NetworkModel.qml"
+)
+printf '%s\n' "$select_wifi_guard" | grep -Fq 'return;'
+if grep -Fq 'Layout.preferredHeight: root.networkModel.selectedWifiNetwork()' "$repo/config/quickshell/network/NetworkWindow.qml"; then
+	exit 1
+fi
+grep -Fq 'readonly property int cardWidth: Theme.controlCenterWidth' "$repo/config/quickshell/controlcenter/ControlCenterWindow.qml"
+grep -Fq 'readonly property int cardWidth: Theme.controlCenterWidth' "$repo/config/quickshell/power/PowerMenuWindow.qml"
+grep -Fq '? Theme.controlCenterX' "$repo/config/quickshell/power/PowerMenuWindow.qml"
+grep -Fq 'property bool navigates: false' "$repo/config/quickshell/core/MenuRow.qml"
+grep -Fq 'MenuHeader {' "$repo/config/quickshell/controlcenter/ControlCenterWindow.qml"
+grep -Fq 'readonly property int compactRowHeight: Math.max(28, Theme.fontBodySize + 12)' \
+	"$repo/config/quickshell/controlcenter/ControlCenterWindow.qml"
+grep -Fq 'margin: Theme.spacingLg' "$repo/config/quickshell/controlcenter/ControlCenterWindow.qml"
+if grep -Fq 'SectionLabel {' "$repo/config/quickshell/controlcenter/ControlCenterWindow.qml"; then
+	printf 'Control Center still renders redundant overview section headers\n' >&2
+	exit 1
+fi
+if grep -Fq 'text: root.powerModel.dpmsEnabled' "$repo/config/quickshell/controlcenter/ControlCenterWindow.qml" ||
+	grep -Fq 'text: root.powerModel.lockEnabled' "$repo/config/quickshell/controlcenter/ControlCenterWindow.qml"; then
+	printf 'Control Center still renders duplicate power status labels\n' >&2
+	exit 1
+fi
+grep -Fq '? root.formatDuration(root.powerModel.dpmsTimeout) : "Off"' \
+	"$repo/config/quickshell/controlcenter/ControlCenterWindow.qml"
+grep -Fq '? root.formatDuration(root.powerModel.lockTimeout) : "Off"' \
+	"$repo/config/quickshell/controlcenter/ControlCenterWindow.qml"
+grep -Fq 'MenuHeader {' "$repo/config/quickshell/power/PowerMenuWindow.qml"
+grep -Fq 'delegate: MenuRow {' "$repo/config/quickshell/power/PowerMenuWindow.qml"
+grep -Fq 'popupHeight: powerCard.implicitHeight' "$repo/config/quickshell/power/PowerMenuWindow.qml"
+if [ -e "$repo/config/quickshell/power/PowerMenuActionButton.qml" ]; then
+	exit 1
+fi
+grep -Fq 'label: "Applications"' "$repo/config/quickshell/controlcenter/ControlCenterWindow.qml"
+grep -Fq 'root.launcherModel.openOnScreen(targetScreen);' "$repo/config/quickshell/controlcenter/ControlCenterWindow.qml"
+grep -Fq 'launcherModel: launcherModel' "$repo/config/quickshell/shell.qml"
+grep -Fq 'label: "Quick Actions"' "$repo/config/quickshell/controlcenter/ControlCenterWindow.qml"
+grep -Fq 'model: root.controlCenterModel.actions' "$repo/config/quickshell/controlcenter/ControlCenterWindow.qml"
+grep -Fq 'root.gtkSettingsAvailable = false;' "$repo/config/quickshell/controlcenter/ControlCenterModel.qml"
+grep -Fq 'root.actionSucceeded = this.text.indexOf("action\t") === 0' "$repo/config/quickshell/controlcenter/ControlCenterModel.qml"
+grep -Fq 'root.message = root.actionSucceeded' "$repo/config/quickshell/controlcenter/ControlCenterModel.qml"
+grep -Fq 'function openWidgets()' "$repo/config/quickshell/controlcenter/ControlCenterModel.qml"
+grep -Fq 'label: "Settings"' "$repo/config/quickshell/controlcenter/ControlCenterWindow.qml"
+grep -Fq 'label: "System Health"' "$repo/config/quickshell/controlcenter/ControlCenterWindow.qml"
+grep -Fq 'label: "Keybinds"' "$repo/config/quickshell/controlcenter/ControlCenterWindow.qml"
+grep -Fq 'label: "System Info"' "$repo/config/quickshell/controlcenter/ControlCenterWindow.qml"
+if grep -Fq 'Reload QS-Config' "$repo/config/quickshell/controlcenter/ControlCenterWindow.qml"; then
+	exit 1
+fi
+if grep -Fq 'property string sidePanel' "$repo/config/quickshell/controlcenter/ControlCenterWindow.qml"; then
+	exit 1
+fi
+[ "$(grep -Fc 'ShellSurface {' "$repo/config/quickshell/controlcenter/ControlCenterWindow.qml")" -eq 1 ]
+grep -Fq 'PanelTooltip {' "$repo/config/quickshell/panel/DwmPanel.qml"
+grep -Fq 'mask: Region {}' "$repo/config/quickshell/core/PanelTooltip.qml"
+grep -Fq 'anchor.edges: Edges.Left | Edges.Top' "$repo/config/quickshell/core/PanelTooltip.qml"
+grep -Fq 'anchor.gravity: Edges.Right | Edges.Bottom' "$repo/config/quickshell/core/PanelTooltip.qml"
+grep -Fq 'root.anchorItem.mapToGlobal(edge, 0)' "$repo/config/quickshell/core/PanelTooltip.qml"
+grep -Fq 'opacity: 1.0' "$repo/config/quickshell/core/PanelPill.qml"
+grep -Fq 'opacity: 1.0' "$repo/config/quickshell/core/ShellSurface.qml"
+grep -Fq 'opacity: 1.0' "$repo/config/quickshell/core/ClickAwayPopup.qml"
+grep -Fq 'RunningAppsArea { desktopState: root.state }' "$repo/config/quickshell/panel/DwmPanel.qml"
+grep -Fq 'onFocusRequested: windowId => root.desktopState.focusWindow(windowId)' "$repo/config/quickshell/panel/RunningAppsArea.qml"
+grep -Fq 'source: Icons.launcherIcon(root.app.appClass)' "$repo/config/quickshell/panel/RunningAppItem.qml"
+grep -Fq 'root.state.activeWindowTitle' "$repo/config/quickshell/panel/DwmPanel.qml"
+grep -Fq 'root.state.statusSegments' "$repo/config/quickshell/panel/DwmPanel.qml"
+grep -Fq 'required property var powerModel' "$repo/config/quickshell/panel/DwmPanel.qml"
+grep -Fq 'root.powerModel.batteryPercent.toString() + "%"' "$repo/config/quickshell/panel/DwmPanel.qml"
+grep -Fq 'visible: root.powerModel.batteryAvailable' "$repo/config/quickshell/panel/DwmPanel.qml"
+[ "$(grep -Fc 'PowerModel {' "$repo/config/quickshell/shell.qml")" -eq 1 ]
+grep -Fq 'powerModel: powerModel' "$repo/config/quickshell/shell.qml"
+if grep -Fq 'visible: root.state.batteryAvailable' "$repo/config/quickshell/panel/DwmPanel.qml"; then
+	exit 1
+fi
+grep -Fq 'root.batteryAvailable = true;' "$repo/config/quickshell/state/DwmState.qml"
+grep -Fq 'trimmed.indexOf("BAT ") === 0' "$repo/config/quickshell/state/DwmState.qml"
+grep -Fq 'color: Theme.barBackground' "$repo/config/quickshell/panel/DwmPanel.qml"
+grep -Fq 'aboveWindows: root.state.fullscreenMonitorIndexes.indexOf(' \
+	"$repo/config/quickshell/panel/DwmPanel.qml"
+grep -Fq 'root.state.screenIndex(root.screen)) === -1' \
+	"$repo/config/quickshell/panel/DwmPanel.qml"
+grep -Fq 'property var fullscreenMonitorIndexes: []' \
+	"$repo/config/quickshell/state/DwmState.qml"
+grep -Fq 'key === "fullscreen_monitors"' "$repo/config/quickshell/state/DwmState.qml"
+if grep -Fq 'color: Theme.transparent' "$repo/config/quickshell/panel/DwmPanel.qml"; then
+	exit 1
+fi
+grep -Fq 'root.controlsModel.volumeUp();' "$repo/config/quickshell/panel/DwmPanel.qml"
+grep -Fq 'root.controlsModel.volumeDown();' "$repo/config/quickshell/panel/DwmPanel.qml"
+grep -Fq 'visible: root.controlsModel.volumeText !== "VOL unavailable"' "$repo/config/quickshell/panel/DwmPanel.qml"
+grep -Fq 'root.controlsModel.volumePercent.toString() + "%"' "$repo/config/quickshell/panel/DwmPanel.qml"
+grep -Fq 'trimmed !== "AC"' "$repo/config/quickshell/state/DwmState.qml"
+grep -Fq 'root.powerMenuModel.open("controlcenter")' "$repo/config/quickshell/controlcenter/ControlCenterWindow.qml"
+grep -Fq 'powerMenuModel.anchorSource === "controlcenter"' "$repo/config/quickshell/power/PowerMenuWindow.qml"
+if grep -Fq 'danger: modelData.id === "shutdown"' "$repo/config/quickshell/power/PowerMenuWindow.qml"; then
+	exit 1
+fi
+if grep -Fq 'danger: true' "$repo/config/quickshell/power/PowerMenuWindow.qml"; then
+	exit 1
+fi
+
+printf 'Quickshell control center helper: PASS\n'

@@ -1,0 +1,94 @@
+#!/bin/sh
+# dwm-session — launch a dwm-fox desktop session.
+#
+# Both supported entry points call this script:
+#   * startx / xinit   -> ~/.xinitrc
+#   * LightDM / GDM    -> /usr/share/xsessions/dwm.desktop (Exec)
+#
+# Ubuntu Server ships no desktop, so a bare `exec dwm` is not sufficient. This
+# wrapper repairs the parts of the session environment that a display manager
+# would normally provide, in a fixed order, and only when they are missing:
+#
+#   1. XDG_RUNTIME_DIR  A systemd user session is required before
+#      wm-graphical-session.service, pipewire and the XDG autostart target can
+#      work. Under a display manager, logind creates /run/user/$UID. Under
+#      startx there is no PAM session at all, so fall back to a private
+#      0700 directory. Nothing here escalates privilege.
+#
+#   2. XDG_DATA_HOME   dwm.c looks for $XDG_DATA_HOME/dwm-fox/scripts/autostart.sh
+#      to run the session bootstrap. Derive the default when unset so the
+#      session works even from a bare `exec dwm` login environment.
+#
+#   3. D-Bus session   Quickshell, PackageKit, NetworkManager, Blueman and the
+#      privileged polkit helpers all need a session bus. Display managers
+#      normally export DBUS_SESSION_BUS_ADDRESS; startx does not. Wrap the
+#      launch in dbus-run-session only when the variable is absent, and only
+#      once (guarded by DWM_FOX_DBUS_WRAPPED so a re-exec cannot loop).
+#
+# The script execs dwm and never returns, so it owns the window manager process
+# and receives its exit status directly.
+
+set -eu
+
+# --- 1. XDG_RUNTIME_DIR ------------------------------------------------------
+if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
+	uid=$(id -u)
+	if [ -d "/run/user/$uid" ]; then
+		XDG_RUNTIME_DIR="/run/user/$uid"
+	else
+		# startx has no logind session. Use a private directory rather than
+		# failing: services that strictly require a logind session will skip
+		# themselves, and autostart.sh degrades instead of crashing.
+		XDG_RUNTIME_DIR="${TMPDIR:-/tmp}/dwm-fox-runtime-$uid"
+		if ! mkdir -p "$XDG_RUNTIME_DIR" 2>/dev/null; then
+			printf 'dwm-session: cannot create XDG_RUNTIME_DIR %s\n' \
+				"$XDG_RUNTIME_DIR" >&2
+			exit 1
+		fi
+		chmod 700 "$XDG_RUNTIME_DIR"
+	fi
+	export XDG_RUNTIME_DIR
+fi
+
+# --- 2. XDG_DATA_HOME -------------------------------------------------------
+if [ -z "${XDG_DATA_HOME:-}" ]; then
+	XDG_DATA_HOME="$HOME/.local/share"
+fi
+export XDG_DATA_HOME
+
+if [ -z "${XDG_CONFIG_HOME:-}" ]; then
+	XDG_CONFIG_HOME="$HOME/.config"
+fi
+export XDG_CONFIG_HOME
+
+# --- 3. D-Bus session bus ---------------------------------------------------
+# DWM_FOX_DBUS_WRAPPED marks the re-entered process so the wrapper below cannot
+# start a second bus. It must not be set on the first pass.
+if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && [ "${DWM_FOX_DBUS_WRAPPED:-}" != 1 ]; then
+	if command -v dbus-run-session >/dev/null 2>&1; then
+		DWM_FOX_DBUS_WRAPPED=1
+		export DWM_FOX_DBUS_WRAPPED
+		exec dbus-run-session -- "$0" "$@"
+	fi
+	# No dbus-run-session (for example dbus-x11 is not installed). LightDM and
+	# GDM also provide dbus-launch, which is a weaker fallback but better than
+	# running with no bus at all.
+	if command -v dbus-launch >/dev/null 2>&1; then
+		eval "$(dbus-launch --sh-syntax)"
+		export DBUS_SESSION_BUS_ADDRESS DBUS_SESSION_BUS_PID
+	fi
+fi
+
+# --- Launch dwm -------------------------------------------------------------
+dwm_bin=${DWM_FOX_DWM_BIN:-/usr/local/bin/dwm}
+if [ ! -x "$dwm_bin" ]; then
+	# Allow a relocated prefix without rewriting the xsessions entry.
+	if command -v dwm >/dev/null 2>&1; then
+		dwm_bin=$(command -v dwm)
+	else
+		printf 'dwm-session: dwm is not installed at %s\n' "$dwm_bin" >&2
+		exit 127
+	fi
+fi
+
+exec "$dwm_bin" "$@"

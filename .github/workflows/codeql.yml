@@ -1,0 +1,46 @@
+name: CodeQL
+
+on:
+  push:
+    branches: ["main"]
+  schedule:
+    - cron: "23 8 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+concurrency:
+  group: codeql-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          mapfile -t packages < <(bash scripts/dwm-packages.sh debian build)
+          sudo apt-get install -y --no-install-recommends "${packages[@]}"
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4.38.2
+        with:
+          languages: c-cpp
+          build-mode: manual
+
+      - name: Build
+        run: |
+          cp config.def.h config.h
+          make clean all
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@v4.38.2

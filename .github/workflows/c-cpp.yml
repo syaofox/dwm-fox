@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Platform and dependency map
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install test tooling
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends shellcheck
+
+      - name: Distribution gate and package-manager wiring
+        run: make check-platform
+
+      - name: Dependency map completeness and installer drift
+        run: make check-package-map
+
+      - name: Qt Quick runtime modules match the QML imports
+        run: bash tests/test-qt-runtime-modules.sh
+
+      - name: Session launcher
+        run: bash tests/test-dwm-session.sh
+
+      - name: Shell lint
+        run: |
+          shellcheck -S warning install.sh \
+            scripts/dwm-session scripts/dwm-distro-family.sh \
+            scripts/dwm-quickshell-repo.sh scripts/dwm-session-setup.sh \
+            scripts/dwm-utils.sh scripts/dwm-packages.sh \
+            tests/test-platform.sh tests/test-package-map.sh \
+            tests/test-dwm-session.sh tests/test-session-setup.sh \
+            tests/test-quickshell-repo.sh tests/test-qt-runtime-modules.sh
+
+  desktop-smoke:
+    name: Desktop smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install build and smoke dependencies
+        run: |
+          sudo apt-get update -qq
+          bash scripts/dwm-packages.sh debian build
+          bash scripts/dwm-packages.sh debian ci-smoke
+        # The map is printed above for review; the install below is explicit so
+        # a profile change is a visible diff rather than a silent expansion.
+
+      - name: Install the resolved dependency set
+        run: |
+          mapfile -t packages < <(bash scripts/dwm-packages.sh debian build)
+          mapfile -t smoke < <(bash scripts/dwm-packages.sh debian ci-smoke)
+          sudo apt-get install -y --no-install-recommends "${packages[@]}" "${smoke[@]}"
+          sudo apt-get install -y --no-install-recommends xserver-xorg \
+            x11-xkb-utils xinput xvfb x11-utils
+
+      - name: Verify the installer refuses an unsupported identity
+        run: |
+          printf 'ID=arch\nPRETTY_NAME="Arch Linux"\n' >"$RUNNER_TEMP/arch-release"
+          if DWM_TEST_MODE=1 DWM_OS_RELEASE="$RUNNER_TEMP/arch-release" \
+              bash install.sh --dry-run --non-interactive --profile core; then
+            echo "install.sh accepted an unsupported distribution" >&2
+            exit 1
+          fi
+
+      - name: Build dwm
+        run: |
+          scripts/run-tests make clean all
+          chmod 0755 dwm
+
+      - name: Launch the session and check basic interaction
+        timeout-minutes: 3
+        env:
+          DISPLAY: ":99"
+        run: |
+          Xvfb :99 -screen 0 1920x1080x24 +extension GLX +extension RANDR &
+          xvfb_pid=$!
+          trap 'kill "$xvfb_pid" 2>/dev/null || true' EXIT
+          sleep 3
+          # Quickshell is not installed in this job; dwm itself must still run.
+          timeout 90 ./dwm >dwm.log 2>&1 &
+          dwm_pid=$!
+          sleep 10
+          if ! xdotool search --class dwm >/dev/null 2>&1; then
+            echo "dwm did not map any window" >&2
+            cat dwm.log >&2
+            exit 1
+          fi
+          kill "$dwm_pid" 2>/dev/null || true

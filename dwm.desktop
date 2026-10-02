@@ -1,0 +1,12 @@
+[Desktop Entry]
+Name=dwm-fox
+Comment=Dynamic window manager (dwm-fox)
+# dwm-session repairs the session environment (XDG_RUNTIME_DIR, XDG_DATA_HOME,
+# session D-Bus) that a display manager would otherwise provide. On Ubuntu
+# Server, startx creates no PAM session at all, so this wrapper is required.
+Exec=@PREFIX@/bin/dwm-session
+Icon=dwm
+Type=Application
+DesktopNames=dwm-fox
+Terminal=false
+NoDisplay=false
